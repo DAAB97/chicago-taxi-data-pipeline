@@ -1,0 +1,1 @@
+{"identities":[{"name":"taxi_pipeline","credentials":[{"accessKey":"taxi_access_key","secretKey":"taxi_secret_key_change_me"}],"actions":["Admin","Read","List","Tagging","Write"]}]}

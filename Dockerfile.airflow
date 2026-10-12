@@ -1,0 +1,6 @@
+FROM apache/airflow:2.10.4-python3.11
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless curl && rm -rf /var/lib/apt/lists/* && mkdir -p /opt/spark-jars && curl -fsSL -o /opt/spark-jars/hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && curl -fsSL -o /opt/spark-jars/aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+USER airflow
+RUN pip install --no-cache-dir apache-airflow-providers-apache-spark==5.0.0 pyspark==3.5.5 requests==2.32.3 boto3==1.35.90

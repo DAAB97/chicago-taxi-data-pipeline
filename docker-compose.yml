@@ -1,0 +1,130 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: airflow, POSTGRES_PASSWORD: airflow, POSTGRES_DB: airflow}
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U airflow"], interval: 5s, timeout: 5s, retries: 20}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  seaweedfs-master:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:latest}
+    command: master -ip=seaweedfs-master -ip.bind=0.0.0.0 -mdir=/data -volumeSizeLimitMB=512
+    ports: ["9333:9333"]
+    volumes: [seaweedfs_master_data:/data]
+  seaweedfs-volume:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:latest}
+    command: volume -ip=seaweedfs-volume -ip.bind=0.0.0.0 -mserver=seaweedfs-master:9333 -dir=/data -max=10
+    depends_on: [seaweedfs-master]
+    ports: ["8082:8080"]
+    volumes: [seaweedfs_volume_data:/data]
+  seaweedfs-filer:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:latest}
+    command: filer -ip=seaweedfs-filer -ip.bind=0.0.0.0 -master=seaweedfs-master:9333
+    depends_on: [seaweedfs-master, seaweedfs-volume]
+    ports: ["8888:8888"]
+    volumes: [seaweedfs_filer_data:/data]
+  seaweedfs-s3:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:latest}
+    command: s3 -filer=seaweedfs-filer:8888 -ip.bind=0.0.0.0 -port=8333 -config=/etc/seaweedfs/s3.json
+    depends_on: [seaweedfs-filer]
+    ports: ["8333:8333"]
+    volumes: [./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro]
+  seaweedfs-init:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      - seaweedfs-master
+      - seaweedfs-volume
+      - seaweedfs-filer
+      - seaweedfs-s3
+    command:
+      - sh
+      - -c
+      - |
+        echo "Waiting for SeaweedFS master..."
+        until curl -fsS http://seaweedfs-master:9333/cluster/status; do
+          sleep 2
+        done
+        echo "Waiting for an available volume server..."
+        until curl -fsS "http://seaweedfs-master:9333/dir/assign?count=1"; do
+          sleep 2
+        done
+        echo "Creating a writable volume for the datalake collection..."
+        curl -fsS -X POST \
+          "http://seaweedfs-master:9333/vol/grow?collection=datalake&count=1&replication=000"
+        echo "SeaweedFS initialization completed."
+  spark-master:
+    build: {context: ., dockerfile: Dockerfile.spark}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment: {SPARK_NO_DAEMONIZE: "true"}
+    ports: ["7077:7077", "8081:8080"]
+    volumes: [./spark/jobs:/opt/spark/jobs:ro]
+  spark-worker:
+    build: {context: ., dockerfile: Dockerfile.spark}
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment: &s3-env
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs-s3:8333}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-taxi_access_key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-taxi_secret_key_change_me}
+      S3_BUCKET: ${S3_BUCKET:-datalake}
+    depends_on: [spark-master, seaweedfs-s3]
+    volumes: [./spark/jobs:/opt/spark/jobs:ro]
+  airflow-init:
+    build: {context: ., dockerfile: Dockerfile.airflow}
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment: &airflow-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW_CONN_SPARK_DEFAULT: spark://spark-master:7077
+      PYTHONPATH: /opt/airflow
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs-s3:8333}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-taxi_access_key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-taxi_secret_key_change_me}
+      S3_BUCKET: ${S3_BUCKET:-datalake}
+      SODA_APP_TOKEN: ${SODA_APP_TOKEN:-}
+      DATASET_ID: ${DATASET_ID:-wrvz-psew}
+      START_DATE: ${START_DATE:-2023-01-01T00:00:00.000}
+      END_DATE: ${END_DATE:-2023-02-01T00:00:00.000}
+      PAGE_SIZE: ${PAGE_SIZE:-50000}
+      MAX_ROWS: ${MAX_ROWS:-500000}
+    command: bash -c "airflow db migrate && airflow users create --username airflow --password airflow --firstname Data --lastname Engineer --role Admin --email airflow@example.com || true"
+    volumes: &airflow-volumes [./airflow/dags:/opt/airflow/dags, ./airflow/logs:/opt/airflow/logs, ./airflow/plugins:/opt/airflow/plugins, ./src:/opt/airflow/src, ./spark/jobs:/opt/spark/jobs]
+  airflow-webserver:
+    build: {context: ., dockerfile: Dockerfile.airflow}
+    depends_on:
+      postgres: {condition: service_healthy}
+      airflow-init: {condition: service_completed_successfully}
+    environment: *airflow-env
+    command: webserver
+    ports: ["8080:8080"]
+    volumes: *airflow-volumes
+    healthcheck: {test: ["CMD", "curl", "--fail", "http://localhost:8080/health"], interval: 10s, timeout: 5s, retries: 20}
+  airflow-scheduler:
+    build: {context: ., dockerfile: Dockerfile.airflow}
+    depends_on:
+      airflow-webserver:
+    	condition: service_healthy
+      seaweedfs-init:
+    	condition: service_completed_successfully
+      spark-master:
+    	condition: service_started
+    environment: *airflow-env
+    command: scheduler
+    volumes: *airflow-volumes
+  storage-smoke-test:
+    image: python:3.11-slim
+    profiles: [test]
+    depends_on:
+  	seaweedfs-init:
+    		condition: service_completed_successfully
+    environment:
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs-s3:8333}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-taxi_access_key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-taxi_secret_key_change_me}
+      S3_BUCKET: ${S3_BUCKET:-datalake}
+    volumes: [./scripts:/tests:ro]
+    command: sh -c "pip install --no-cache-dir boto3==1.35.90 && python /tests/test_seaweedfs_s3.py"
+volumes: {postgres_data: {}, seaweedfs_master_data: {}, seaweedfs_volume_data: {}, seaweedfs_filer_data: {}}

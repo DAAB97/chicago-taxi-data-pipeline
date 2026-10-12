@@ -1,0 +1,41 @@
+# Local environment and secrets
+.env
+.env.local
+.env.*.local
+# Airflow runtime
+airflow/logs/*
+!airflow/logs/.gitkeep
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+# Virtual environments
+.venv/
+venv/
+env/
+# Spark runtime
+spark-warehouse/
+metastore_db/
+derby.log
+# Data generated locally
+data/
+*.csv
+*.parquet
+*.jsonl
+# IDE
+.vscode/
+.idea/
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+# Temporary and log files
+*.log
+*.tmp
+*.temp
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.whl
